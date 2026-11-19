@@ -243,8 +243,8 @@ if __name__ == "__main__":
         "--attention-heads",
         default="",
         help=(
-            "FlowLM heads whose pre-softmax scores to output as `text_attention` "
-            "[1, heads, cache_len], written like `L3H8+L2H0`."
+            "FlowLM heads whose pre-softmax scores to add as one extra output, "
+            "shape [1, heads, cache_len], written like `L3H8+L2H0`."
         ),
     )
     args = parser.parse_args()
