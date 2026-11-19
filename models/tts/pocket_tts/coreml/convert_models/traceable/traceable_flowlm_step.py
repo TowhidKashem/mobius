@@ -22,10 +22,16 @@ class TraceableFlowLMStep(nn.Module):
     Use this after text/voice conditioning is already in the KV cache.
     """
 
-    def __init__(self, num_layers: int = 6, max_seq_len: int = 200):
+    def __init__(
+        self,
+        num_layers: int = 6,
+        max_seq_len: int = 200,
+        attention_heads: Tuple[Tuple[int, int], ...] = (),
+    ):
         super().__init__()
 
         self.num_layers = num_layers
+        self.attention_heads = attention_heads
         self.embed_dim = 1024
         self.num_heads = 16
         self.head_dim = 64
@@ -57,10 +63,17 @@ class TraceableFlowLMStep(nn.Module):
         self.out_eos = nn.Linear(1024, 1)
 
     @classmethod
-    def from_flowlm(cls, flow_lm_model, max_seq_len: int = 200) -> "TraceableFlowLMStep":
+    def from_flowlm(
+        cls,
+        flow_lm_model,
+        max_seq_len: int = 200,
+        attention_heads: Tuple[Tuple[int, int], ...] = (),
+    ) -> "TraceableFlowLMStep":
         """Create traceable step model from original FlowLM model."""
         num_layers = len(flow_lm_model.transformer.layers)
-        wrapper = cls(num_layers=num_layers, max_seq_len=max_seq_len)
+        wrapper = cls(
+            num_layers=num_layers, max_seq_len=max_seq_len, attention_heads=attention_heads
+        )
 
         # Copy input linear
         wrapper.input_linear.weight.data.copy_(flow_lm_model.input_linear.weight.data)
@@ -146,7 +159,8 @@ class TraceableFlowLMStep(nn.Module):
         out_proj: nn.Linear,
         cache: torch.Tensor,
         position: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        heads: Tuple[int, ...] = (),
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list]:
         """Streaming attention with fixed-size KV cache."""
         B, T = 1, 1
         H = self.num_heads
@@ -202,6 +216,7 @@ class TraceableFlowLMStep(nn.Module):
         # Manual attention (avoids scaled_dot_product_attention op for iOS 17 compat)
         scale = 1.0 / (q.shape[-1] ** 0.5)
         attn_weights = torch.matmul(q, keys.transpose(-2, -1)) * scale
+        head_scores = [attn_weights[:, head, 0, :] for head in heads]
         attn_weights = attn_weights.masked_fill(~attn_mask, float("-inf"))
         attn_weights = torch.softmax(attn_weights, dim=-1)
         attn_output = torch.matmul(attn_weights, values)
@@ -211,7 +226,7 @@ class TraceableFlowLMStep(nn.Module):
 
         new_position = pos_float + float(T)
 
-        return output, new_cache, new_position
+        return output, new_cache, new_position, head_scores
 
     def forward(
         self,
@@ -245,18 +260,23 @@ class TraceableFlowLMStep(nn.Module):
         positions = list(cache_and_positions[1::2])
         new_caches = []
         new_positions = []
+        scores_by_head = {}
 
         # Transformer layers
         for i in range(self.num_layers):
             residual = x
             x_norm = getattr(self, f'norm{i}_1')(x)
-            attn_out, new_cache, new_pos = self._streaming_attention(
+            layer_heads = tuple(head for layer, head in self.attention_heads if layer == i)
+            attn_out, new_cache, new_pos, layer_scores = self._streaming_attention(
                 x_norm,
                 getattr(self, f'attn{i}_in_proj'),
                 getattr(self, f'attn{i}_out_proj'),
                 caches[i],
-                positions[i]
+                positions[i],
+                layer_heads,
             )
+            for head, scores in zip(layer_heads, layer_scores):
+                scores_by_head[(i, head)] = scores
             x = residual + attn_out
 
             residual = x
@@ -276,6 +296,11 @@ class TraceableFlowLMStep(nn.Module):
         for nc, np_ in zip(new_caches, new_positions):
             tail.append(nc)
             tail.append(np_)
+        if self.attention_heads:
+            text_attention = torch.stack(
+                [scores_by_head[layer_head] for layer_head in self.attention_heads], dim=1
+            )
+            tail.append(text_attention)
         return tuple([x, is_eos] + tail)
 
 

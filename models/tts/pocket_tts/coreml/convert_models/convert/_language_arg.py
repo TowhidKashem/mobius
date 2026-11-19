@@ -16,6 +16,7 @@ import os
 # Ordered: English first (default), then 6-layer variants, then 24-layer.
 SUPPORTED_LANGUAGES: tuple[str, ...] = (
     "english",
+    "english_2026-10",
     "german",
     "italian",
     "portuguese",
