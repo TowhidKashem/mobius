@@ -85,11 +85,20 @@ def _apply_int8_to_wrapper(step_model, num_layers: int):
     return quantized_model
 
 
+def parse_attention_heads(value: str) -> tuple[tuple[int, int], ...]:
+    heads = []
+    for item in filter(None, value.split("+")):
+        layer, head = item.upper().removeprefix("L").split("H")
+        heads.append((int(layer), int(head)))
+    return tuple(heads)
+
+
 def convert_flowlm_step(
     language: str,
     compute_precision: str = "fp16",
     compute_units: str = "ALL",
     int8: bool = False,
+    attention_heads: tuple[tuple[int, int], ...] = (),
 ):
     print(f"Loading model (language={language})...")
     from pocket_tts import TTSModel
@@ -98,7 +107,9 @@ def convert_flowlm_step(
 
     print("Creating traceable step model...")
     max_seq_len = 512
-    step_model = TraceableFlowLMStep.from_flowlm(model.flow_lm, max_seq_len=max_seq_len)
+    step_model = TraceableFlowLMStep.from_flowlm(
+        model.flow_lm, max_seq_len=max_seq_len, attention_heads=attention_heads
+    )
     step_model.eval()
     num_layers = step_model.num_layers
     print(f"num_layers={num_layers}")
@@ -160,6 +171,8 @@ def convert_flowlm_step(
     # Outputs: (x, is_eos, cache0_out, position0_out, ..., cacheN_out, positionN_out)
     n_outputs = 2 + 2 * num_layers
     ct_outputs = [ct.TensorType(dtype=np.float32) for _ in range(n_outputs)]
+    if attention_heads:
+        ct_outputs.append(ct.TensorType(dtype=np.float32))
 
     mlmodel = ct.convert(
         traced,
@@ -226,7 +239,19 @@ if __name__ == "__main__":
             "flowlm_stepv2.mlpackage."
         ),
     )
+    parser.add_argument(
+        "--attention-heads",
+        default="",
+        help=(
+            "FlowLM heads whose pre-softmax scores to add as one extra output, "
+            "shape [1, heads, cache_len], written like `L3H8+L2H0`."
+        ),
+    )
     args = parser.parse_args()
     convert_flowlm_step(
-        args.language, args.compute_precision, args.compute_units, int8=args.int8
+        args.language,
+        args.compute_precision,
+        args.compute_units,
+        int8=args.int8,
+        attention_heads=parse_attention_heads(args.attention_heads),
     )
